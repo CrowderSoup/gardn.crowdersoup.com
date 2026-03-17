@@ -1,4 +1,9 @@
-# Gardn for the handmade web
+---
+title: Gardn for the handmade web
+slug: home
+description: What Gardn is and why people use it.
+menu: Start
+---
 
 Gardn is a tending layer for people who want a living site, not a feed prison. It gives your personal website a planted timeline: plants, harvests, and blog-roll moments that stay yours.
 

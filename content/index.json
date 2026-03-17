@@ -5,55 +5,13 @@
     "footer": "Build your plot at gardn.website",
     "url": "https://gardn.crowdersoup.com/",
     "indieweb": {
-      "webmentionEndpoint": "https://webmention.io/crowdersoup.com/webmention"
+      "webmentionEndpoint": "https://webmention.io/crowdersoup.com/webmention",
+      "author": {
+        "name": "",
+        "url": "https://gardn.crowdersoup.com/",
+        "photo": ""
+      }
     }
   },
-  "sections": [
-    {
-      "title": "Start Here",
-      "items": [
-        {
-          "title": "Home",
-          "file": "home.md",
-          "slug": "home",
-          "description": "What Gardn is and why people use it."
-        },
-        {
-          "title": "How It Works",
-          "file": "how-it-works.md",
-          "slug": "how-it-works",
-          "description": "The Gardn publishing flow in plain language."
-        },
-        {
-          "title": "Get Started",
-          "file": "get-started.md",
-          "slug": "get-started",
-          "description": "Ship your first Gardn-powered page quickly."
-        }
-      ]
-    },
-    {
-      "title": "Reality Check",
-      "items": [
-        {
-          "title": "Limitations",
-          "file": "limitations.md",
-          "slug": "limitations",
-          "description": "Where Gardn embeds work and where they currently do not."
-        },
-        {
-          "title": "Now",
-          "file": "now.md",
-          "slug": "now",
-          "description": "Current direction for Gardn."
-        },
-        {
-          "title": "Links",
-          "file": "links.md",
-          "slug": "links",
-          "description": "Try Gardn, read docs, and follow updates."
-        }
-      ]
-    }
-  ]
+  "files": ["home.md", "how-it-works.md", "get-started.md", "limitations.md", "now.md", "links.md"]
 }

@@ -8,12 +8,22 @@ const siteTitle = document.getElementById("site-title");
 const siteTagline = document.getElementById("site-tagline");
 const siteFooter = document.getElementById("site-footer");
 const webmentions = document.getElementById("webmentions");
+const metaDescription = document.querySelector('meta[name="description"]');
+const ogTitle = document.querySelector('meta[property="og:title"]');
+const ogDescription = document.querySelector('meta[property="og:description"]');
+const ogUrl = document.querySelector('meta[property="og:url"]');
 
 let manifest = null;
+let pages = [];
+const pageCache = new Map();
+const pageByRoute = new Map();
+const routeConflicts = new Set();
+const cacheNamespace = "neo-cms-cache:v1:";
 
 const indieweb = {
   siteUrl: "",
   webmentionEndpoint: "",
+  author: { name: "", url: "", photo: "" },
 };
 
 const readHeadLink = (rel) => {
@@ -34,7 +44,131 @@ const slugify = (text) =>
     .trim()
     .replace(/\s+/g, "-");
 
-const parseMarkdown = (raw) => {
+const parseSimpleYaml = (lines) => {
+  const data = {};
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+    const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (!match) return;
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    data[match[1]] = value;
+  });
+  return data;
+};
+
+const toBoolean = (value) => {
+  if (typeof value === "boolean") return value;
+  if (value == null) return false;
+  return ["true", "yes", "1", "on"].includes(String(value).toLowerCase());
+};
+
+const toNumber = (value, fallback = 0) => {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const readCache = (key) => {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data.body !== "string") return null;
+    return data;
+  } catch (error) {
+    return null;
+  }
+};
+
+const writeCache = (key, value) => {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+};
+
+const fetchTextWithCache = async (url) => {
+  const cacheKey = `${cacheNamespace}${url}`;
+  const cached = readCache(cacheKey);
+  const headers = {};
+
+  if (cached?.etag) headers["If-None-Match"] = cached.etag;
+  if (cached?.lastModified) {
+    headers["If-Modified-Since"] = cached.lastModified;
+  }
+
+  let response;
+  try {
+    response = await fetch(url, { cache: "no-store", headers });
+  } catch (error) {
+    if (cached) return cached.body;
+    throw error;
+  }
+
+  if (response.status === 304 && cached) return cached.body;
+
+  if (!response.ok) {
+    if (cached) return cached.body;
+    throw new Error("Missing file");
+  }
+
+  const body = await response.text();
+  const etag = response.headers.get("ETag") || "";
+  const lastModified = response.headers.get("Last-Modified") || "";
+
+  if (etag || lastModified) {
+    writeCache(cacheKey, {
+      body,
+      etag,
+      lastModified,
+      cachedAt: Date.now(),
+    });
+  }
+
+  return body;
+};
+
+const getNotFoundRoute = () => {
+  const fallback = manifest?.site?.notFound || "not-found";
+  return String(fallback || "").trim();
+};
+
+const parseFrontMatter = (raw) => {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines[0]?.trim() !== "---") {
+    return { meta: {}, body: normalized };
+  }
+
+  const yamlLines = [];
+  let endIndex = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i].trim() === "---") {
+      endIndex = i;
+      break;
+    }
+    yamlLines.push(lines[i]);
+  }
+
+  if (endIndex === -1) {
+    return { meta: {}, body: normalized };
+  }
+
+  return {
+    meta: parseSimpleYaml(yamlLines),
+    body: lines.slice(endIndex + 1).join("\n"),
+  };
+};
+
+const parseMarkdown = (raw, options = {}) => {
+  const allowHtml = Boolean(options.allowHtml);
   const lines = raw.replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   let buffer = [];
@@ -50,7 +184,12 @@ const parseMarkdown = (raw) => {
   };
 
   const inlineMarkdown = (text) => {
-    let html = escapeHtml(text);
+    let html = allowHtml ? text : escapeHtml(text);
+    html = html.replace(
+      /!\[([^\]]*)\]\(([^)]+)\)/g,
+      (match, alt, url) =>
+        `<img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" />`,
+    );
     html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
@@ -69,7 +208,6 @@ const parseMarkdown = (raw) => {
         blocks.push(`<pre><code>${escapeHtml(buffer.join("\n"))}</code></pre>`);
         buffer = [];
         inCode = false;
-        codeLang = "";
       } else {
         flushParagraph();
         inCode = true;
@@ -156,6 +294,42 @@ const parseMarkdown = (raw) => {
   return blocks.join("");
 };
 
+const buildRoute = (file, slug) => {
+  const stem = file.replace(/\.md$/i, "");
+  const parts = stem.split("/");
+  const base = slug || parts[parts.length - 1] || "page";
+  if (parts.length > 1) {
+    parts[parts.length - 1] = base;
+    return parts.join("/");
+  }
+  return base;
+};
+
+const loadPageSource = async (file) => {
+  if (pageCache.has(file)) return pageCache.get(file);
+  const raw = await fetchTextWithCache(`content/${file}`);
+  const { meta, body } = parseFrontMatter(raw);
+  const headingMatch = body.match(/^#\s+(.+)$/m);
+  const title =
+    meta.title || (headingMatch ? headingMatch[1].trim() : "Untitled");
+  const page = {
+    file,
+    raw,
+    body,
+    meta,
+    title,
+    description: meta.description || "",
+    menu: meta.menu || "",
+    slug: meta.slug || "",
+    weight: toNumber(meta.weight, 0),
+    url: meta.url || "",
+    draft: toBoolean(meta.draft),
+    allowHtml: toBoolean(meta.allowHtml),
+  };
+  pageCache.set(file, page);
+  return page;
+};
+
 const setStatus = (text) => {
   pageStatus.textContent = text;
 };
@@ -180,6 +354,59 @@ const getPageUrl = (page, slug) => {
   if (!base) return "";
   const baseUrl = base.replace(/#.*$/, "");
   return `${baseUrl}#${slug}`;
+};
+
+const updateMetaTags = (page, slug) => {
+  const siteT = manifest?.site?.title || "Neo-CMS";
+  const pageT = page?.title;
+  document.title = pageT ? `${pageT} | ${siteT}` : siteT;
+
+  const desc = page?.description || manifest?.site?.tagline || "";
+  if (metaDescription) metaDescription.setAttribute("content", desc);
+  if (ogTitle) ogTitle.setAttribute("content", pageT || siteT);
+  if (ogDescription) ogDescription.setAttribute("content", desc);
+
+  if (ogUrl) {
+    const url = getPageUrl(page, slug);
+    ogUrl.setAttribute("content", url || window.location.href);
+  }
+};
+
+const renderHCard = () => {
+  const card = document.querySelector(".brand-card");
+  if (!card) return;
+  card.classList.add("h-card");
+  if (card.querySelector(".p-name")) return; // idempotency guard
+  const { name, url, photo } = indieweb.author;
+  if (name || url) {
+    const anchor = document.createElement("a");
+    anchor.className = "p-name u-url";
+    anchor.rel = "me";
+    anchor.style.display = "none";
+    anchor.setAttribute("aria-hidden", "true");
+    anchor.textContent = name;
+    anchor.href = url;
+    card.appendChild(anchor);
+  }
+  if (photo) {
+    const img = document.createElement("img");
+    img.className = "u-photo";
+    img.src = photo;
+    img.style.display = "none";
+    img.setAttribute("aria-hidden", "true");
+    card.appendChild(img);
+  }
+};
+
+const renderHEntry = (html, page, slug) => {
+  const title = page?.title || "";
+  const url = getPageUrl(page, slug) || "";
+  const date = page?.meta?.date || "";
+  const dateAttr =
+    date && /^\d{4}-\d{2}-\d{2}/.test(date)
+      ? `<time class="dt-published" datetime="${escapeHtml(date)}" style="display:none" aria-hidden="true"></time>`
+      : "";
+  return `<div class="h-entry"><span class="p-name" style="display:none" aria-hidden="true">${escapeHtml(title)}</span><a class="u-url" href="${escapeHtml(url)}" style="display:none" aria-hidden="true"></a>${dateAttr}<div class="e-content">${html}</div></div>`;
 };
 
 const getMentionType = (mention) => {
@@ -310,21 +537,38 @@ const loadWebmentions = async (page, slug) => {
 
 const renderNav = () => {
   nav.innerHTML = "";
-  manifest.sections.forEach((section) => {
+  const sections = new Map();
+  const order = [];
+
+  pages.forEach((page) => {
+    if (page.draft || page.routeConflict) return;
+    const menu = page.menu || "Pages";
+    if (!sections.has(menu)) {
+      sections.set(menu, []);
+      order.push(menu);
+    }
+    sections.get(menu).push(page);
+  });
+
+  order.forEach((menu) => {
     const sectionEl = document.createElement("div");
     sectionEl.className = "nav-section";
-    sectionEl.innerHTML = `<h3>${section.title}</h3>`;
+    sectionEl.innerHTML = `<h3>${menu}</h3>`;
 
     const links = document.createElement("div");
     links.className = "nav-links";
 
-    section.items.forEach((item) => {
-      const slug = item.slug || slugify(item.title || item.file);
-      item.slug = slug;
+    const sorted = sections.get(menu).slice().sort((a, b) => {
+      if (a.weight !== b.weight) return a.weight - b.weight;
+      if (a.order !== b.order) return a.order - b.order;
+      return (a.title || a.route).localeCompare(b.title || b.route);
+    });
+
+    sorted.forEach((page) => {
       const link = document.createElement("a");
-      link.href = `#${slug}`;
-      link.textContent = item.title || slug;
-      link.dataset.slug = slug;
+      link.href = `#${page.route}`;
+      link.textContent = page.title || page.route;
+      link.dataset.slug = page.route;
       links.appendChild(link);
     });
 
@@ -340,12 +584,7 @@ const markActiveLink = (slug) => {
 };
 
 const findPage = (slug) => {
-  for (const section of manifest.sections) {
-    for (const item of section.items) {
-      if (item.slug === slug) return item;
-    }
-  }
-  return null;
+  return pageByRoute.get(slug) || null;
 };
 
 const renderEmpty = (message) => {
@@ -354,18 +593,42 @@ const renderEmpty = (message) => {
 
 const loadPage = async () => {
   if (!manifest) return;
-  const slug =
-    location.hash.replace("#", "") || manifest.sections[0].items[0].slug;
-  const page = findPage(slug);
-  markActiveLink(slug);
+  if (!pages.length) {
+    pageTitle.textContent = "No pages";
+    pageSubtitle.textContent =
+      "Add markdown files to content/ and list them in content/index.json.";
+    setStatus("Setup");
+    renderEmpty("Add markdown files and refresh to see them here.");
+    if (webmentions) {
+      webmentions.innerHTML = "";
+    }
+    return;
+  }
+  const slug = location.hash.replace("#", "") || pages[0].route;
+  let page = findPage(slug);
+  const notFoundRoute = getNotFoundRoute();
+  const fallbackPage = notFoundRoute ? findPage(notFoundRoute) : null;
+
+  if (!page && fallbackPage && slug !== notFoundRoute) {
+    location.hash = `#${notFoundRoute}`;
+    return;
+  }
+
+  markActiveLink(page ? page.route : slug);
+  updateMetaTags(page, slug);
 
   if (!page) {
     pageTitle.textContent = "Missing page";
     pageSubtitle.textContent =
       "The link you followed does not exist in content/index.json.";
     setStatus("Not found");
+    const notFoundLink = fallbackPage
+      ? ` or view <a href="#${escapeHtml(
+          notFoundRoute,
+        )}">the 404 page</a>`
+      : "";
     renderEmpty(
-      "Add the page back into <code>content/index.json</code> or pick another link.",
+      `Add the page back into <code>content/index.json</code> or pick another link${notFoundLink}.`,
     );
     if (webmentions) {
       webmentions.innerHTML = "";
@@ -379,19 +642,11 @@ const loadPage = async () => {
   setStatus("Loading");
 
   try {
-    const response = await fetch(`content/${page.file}`, {
-      cache: "no-store",
-    });
-    if (!response.ok) {
-      throw new Error("Missing file");
-    }
-    const raw = await response.text();
-    const html = parseMarkdown(raw);
-    content.innerHTML = html || "<p>Empty page.</p>";
-    const headingMatch = raw.match(/^#\s+(.+)$/m);
-    if (!page.title && headingMatch) {
-      pageTitle.textContent = headingMatch[1].trim();
-    }
+    const source = await loadPageSource(page.file);
+    const html = parseMarkdown(source.body, { allowHtml: source.allowHtml });
+    pageTitle.textContent = source.title || pageTitle.textContent;
+    updateMetaTags(source, slug);
+    content.innerHTML = renderHEntry(html || "<p>Empty page.</p>", source, slug);
     setStatus("Loaded");
     loadWebmentions(page, slug);
   } catch (error) {
@@ -407,15 +662,76 @@ const loadPage = async () => {
   }
 };
 
+const loadPages = async () => {
+  pageByRoute.clear();
+  pages = [];
+  routeConflicts.clear();
+
+  const files = Array.isArray(manifest.files) ? manifest.files : [];
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    try {
+      const source = await loadPageSource(file);
+      const route = buildRoute(file, source.slug);
+      if (source.slug) {
+        const normalizedSlug = slugify(source.slug);
+        if (normalizedSlug !== source.slug) {
+          console.warn(
+            `Slug "${source.slug}" in ${file} normalizes to "${normalizedSlug}".`,
+          );
+        }
+        if (source.slug.includes("/")) {
+          console.warn(`Slug "${source.slug}" in ${file} contains a "/".`);
+        }
+      }
+      if (pageByRoute.has(route)) {
+        routeConflicts.add(route);
+        console.warn(
+          `Duplicate route "${route}" detected. Only the first instance will appear in navigation.`,
+        );
+      }
+      const page = { ...source, route, order: index };
+      if (routeConflicts.has(route)) {
+        page.routeConflict = true;
+      }
+      pages.push(page);
+      if (!pageByRoute.has(route)) {
+        pageByRoute.set(route, page);
+      }
+    } catch (error) {
+      const route = buildRoute(file, "");
+      const fallback = {
+        file,
+        title: route,
+        description: "",
+        menu: "",
+        slug: "",
+        url: "",
+        route,
+        error: true,
+        weight: 0,
+        draft: false,
+        allowHtml: false,
+        order: index,
+      };
+      pages.push(fallback);
+      if (!pageByRoute.has(route)) {
+        pageByRoute.set(route, fallback);
+      }
+    }
+  }
+
+  renderNav();
+  await loadPage();
+};
+
 const loadManifest = async () => {
   try {
-    const response = await fetch(manifestPath, { cache: "no-store" });
-    if (!response.ok) throw new Error("Missing manifest");
-    manifest = await response.json();
+    const raw = await fetchTextWithCache(manifestPath);
+    manifest = JSON.parse(raw);
 
     siteTitle.textContent = manifest.site?.title || "Neo-CMS";
     siteTagline.textContent = manifest.site?.tagline || siteTagline.textContent;
-    siteFooter.textContent = manifest.site?.footer || "";
     indieweb.webmentionEndpoint =
       readHeadLink("webmention") || indieweb.webmentionEndpoint;
     const siteConfig = manifest.site || {};
@@ -423,8 +739,15 @@ const loadManifest = async () => {
     indieweb.siteUrl = siteConfig.url || indieweb.siteUrl;
     indieweb.webmentionEndpoint =
       indiewebConfig.webmentionEndpoint || indieweb.webmentionEndpoint;
-    renderNav();
-    await loadPage();
+    const authorConfig = indiewebConfig.author || {};
+    indieweb.author.name  = authorConfig.name  || "";
+    indieweb.author.url   = authorConfig.url   || "";
+    indieweb.author.photo = authorConfig.photo || "";
+    const footerText = manifest.site?.footer || "";
+    const sep = footerText ? " " : "";
+    siteFooter.innerHTML = `${escapeHtml(footerText)}${sep}<a href="./feed.xml" rel="alternate" type="application/rss+xml">RSS Feed</a>`;
+    renderHCard();
+    await loadPages();
   } catch (error) {
     pageTitle.textContent = "Manifest missing";
     pageSubtitle.textContent =
