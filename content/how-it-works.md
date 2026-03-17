@@ -1,4 +1,9 @@
-# How Gardn works
+---
+title: How Gardn works
+slug: how-it-works
+description: The Gardn publishing flow in plain language.
+menu: Start
+---
 
 Gardn keeps the workflow simple:
 
