@@ -1,3 +1,9 @@
+---
+title: Limitations and hosting compatibility
+slug: limitations
+description: CSP requirements and which hosts work with Gardn embeds.
+---
+
 # Limitations and hosting compatibility
 
 Gardn supports two embed methods with different CSP requirements. Iframe embeds need `frame-src https://gardn.website`. The JavaScript loader needs `connect-src https://gardn.website`.

@@ -1,3 +1,9 @@
+---
+title: Links
+slug: links
+description: Useful links related to Gardn and the IndieWeb.
+---
+
 # Links
 
 - [Try Gardn](https://gardn.website)

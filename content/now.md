@@ -1,3 +1,9 @@
+---
+title: Now
+slug: now
+description: What Gardn is focused on right now.
+---
+
 # Now
 
 Current Gardn direction:

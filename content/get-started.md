@@ -1,3 +1,9 @@
+---
+title: Get started in minutes
+slug: get-started
+description: How to embed Gardn on your site in a few steps.
+---
+
 # Get started in minutes
 
 You can treat Gardn as progressive enhancement for your existing site.
